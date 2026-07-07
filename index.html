@@ -65,15 +65,40 @@
     letter-spacing: -0.01em;
   }
 
+  .stats-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 14px;
+  }
+
   .stats {
     display: flex;
     gap: 18px;
-    margin-top: 14px;
     font-family: 'JetBrains Mono', monospace;
     font-size: 13px;
     color: var(--text-dim);
   }
   .stats b { color: var(--text); font-weight: 600; }
+
+  .reset-btn {
+    flex-shrink: 0;
+    padding: 6px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--text-dim);
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .reset-btn:active {
+    border-color: var(--rose);
+    color: var(--rose);
+  }
 
   /* -- Waveform, the signature element -- */
   .stage {
@@ -275,11 +300,14 @@
 <div class="app">
   <header>
     <div class="eyebrow">Ear Training · 離線音感練習</div>
-    <h1>這是哪個音？</h1>
-    <div class="stats">
-      <div>正確 <b id="statCorrect">0</b></div>
-      <div>已答 <b id="statTotal">0</b></div>
-      <div>連續 <b id="statStreak">0</b></div>
+    <h1 id="pageTitle">這是哪個音？</h1>
+    <div class="stats-row">
+      <div class="stats">
+        <div>正確 <b id="statCorrect">0</b></div>
+        <div>已答 <b id="statTotal">0</b></div>
+        <div>連續 <b id="statStreak">0</b></div>
+      </div>
+      <button class="reset-btn" id="resetBtn" title="清除紀錄，重新開始">重置</button>
     </div>
   </header>
 
@@ -301,7 +329,12 @@
   <button class="next-btn" id="nextBtn">下一題 →</button>
 
   <div class="settings">
-    <div class="settings-label">難度</div>
+    <div class="settings-label">模式</div>
+    <div class="diff-row" id="modeRow">
+      <button class="diff-btn" data-mode="single">單音</button>
+      <button class="diff-btn" data-mode="dual">雙音（和聲）</button>
+    </div>
+    <div class="settings-label" style="margin-top:14px;">難度</div>
     <div class="diff-row" id="diffRow">
       <button class="diff-btn" data-diff="easy">簡單</button>
       <button class="diff-btn" data-diff="medium">中等</button>
@@ -358,40 +391,52 @@
     return audioCtx;
   }
 
-  function playTone(freq, duration = 1.1) {
+  function playTones(freqs, duration = 1.1) {
     const ctx = getCtx();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = "sine";
-    osc.frequency.value = freq;
-
-    // ADSR 簡化版包絡：避免 click 聲，開頭/結尾做淡入淡出
     const now = ctx.currentTime;
-    gain.gain.setValueAtTime(0, now);
-    gain.gain.linearRampToValueAtTime(0.28, now + 0.03);
-    gain.gain.setValueAtTime(0.28, now + duration - 0.15);
-    gain.gain.linearRampToValueAtTime(0, now + duration);
+    // 多個音一起從同一個時間點開始播放，才會聽起來是「同時」的和聲
+    // 每個音量稍微降低一點，避免疊加後音量爆掉
+    const perVoiceGain = freqs.length > 1 ? 0.2 : 0.28;
 
-    osc.connect(gain).connect(ctx.destination);
-    osc.start(now);
-    osc.stop(now + duration + 0.05);
+    freqs.forEach(freq => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = "sine";
+      osc.frequency.value = freq;
+
+      gain.gain.setValueAtTime(0, now);
+      gain.gain.linearRampToValueAtTime(perVoiceGain, now + 0.03);
+      gain.gain.setValueAtTime(perVoiceGain, now + duration - 0.15);
+      gain.gain.linearRampToValueAtTime(0, now + duration);
+
+      osc.connect(gain).connect(ctx.destination);
+      osc.start(now);
+      osc.stop(now + duration + 0.05);
+    });
 
     return duration * 1000;
   }
 
   // ---------- 3. 遊戲狀態 ----------
+  let mode = "single"; // "single" | "dual"
   let difficulty = "easy";
   const DIFF_GAP = { easy: [5, 12], medium: [2, 4], hard: [1, 2] };
+  const INTERVAL_MIN = 1, INTERVAL_MAX = 12; // 雙音模式：根音上方的音程範圍(半音數)
 
-  let current = null;   // 正確答案 note object
-  let options = [];      // 三個選項
+  let current = null;   // 正確答案：單音模式是 note object；雙音模式是 { root, top }
+  let options = [];      // 三個選項，形狀跟 current 一致
   let answered = false;
   let stats = { correct: 0, total: 0, streak: 0 };
 
   function pickRandom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
   function buildQuestion() {
+    if (mode === "dual") buildDualQuestion();
+    else buildSingleQuestion();
+  }
+
+  function buildSingleQuestion() {
     current = pickRandom(NOTES);
     const [minGap, maxGap] = DIFF_GAP[difficulty];
 
@@ -422,6 +467,54 @@
     }
 
     options = [current, ...distractors].sort(() => Math.random() - 0.5);
+    finishBuildingQuestion();
+  }
+
+  // 雙音 (和聲) 模式：固定一個根音，只變化上面那個音，
+  // 這樣三個選項比的是同一個根音之上、不同音程大小的差異
+  function buildDualQuestion() {
+    const [minGap, maxGap] = DIFF_GAP[difficulty];
+
+    // 根音要留出至少一個八度的空間，避免上面的音超出音表範圍
+    const rootCandidates = NOTES.filter(n => n.semitone <= (14 - INTERVAL_MAX));
+    const root = pickRandom(rootCandidates.length ? rootCandidates : NOTES);
+
+    const interval = INTERVAL_MIN + Math.floor(Math.random() * (INTERVAL_MAX - INTERVAL_MIN + 1));
+    const correctTop = NOTES.find(n => n.semitone === root.semitone + interval);
+
+    let pool = NOTES.filter(n => {
+      const d = Math.abs(n.semitone - correctTop.semitone);
+      return d >= minGap && d <= maxGap && n.semitone !== root.semitone;
+    });
+
+    let widenBy = 1;
+    while (pool.length < 2 && widenBy < 24) {
+      pool = NOTES.filter(n => {
+        const d = Math.abs(n.semitone - correctTop.semitone);
+        return d >= 1 && d <= (maxGap + widenBy) && n.semitone !== root.semitone;
+      });
+      widenBy++;
+    }
+
+    const distractorTops = [];
+    const usedNames = new Set([correctTop.name]);
+    while (distractorTops.length < 2 && distractorTops.length < pool.length) {
+      const cand = pickRandom(pool);
+      if (!usedNames.has(cand.name)) {
+        usedNames.add(cand.name);
+        distractorTops.push(cand);
+      }
+    }
+
+    current = { root, top: correctTop };
+    options = [correctTop, ...distractorTops]
+      .map(t => ({ root, top: t }))
+      .sort(() => Math.random() - 0.5);
+
+    finishBuildingQuestion();
+  }
+
+  function finishBuildingQuestion() {
     answered = false;
     renderOptions();
     clearFeedback();
@@ -451,9 +544,8 @@
     return BASS_TOP_Y + (i - 26) / 4 * (TREBLE_BOTTOM_Y - BASS_TOP_Y);
   }
 
-  function noteStaffSVG(note) {
-    const y = yForIndex(note.diatonicIndex);
-    let svg = `<svg viewBox="0 0 ${SVG_W} ${SVG_H}" xmlns="http://www.w3.org/2000/svg">`;
+  function staffBaseSVG() {
+    let svg = "";
     const strokeColor = "var(--text-dim)";
 
     // 高音譜表 5 條線
@@ -471,34 +563,63 @@
     svg += `<text x="${STAFF_X1 + 6}" y="${yForIndex(32) + 13}" font-size="34" fill="var(--text-dim)">𝄞</text>`;
     svg += `<text x="${STAFF_X1 + 8}" y="${yForIndex(24) + 8}" font-size="20" fill="var(--text-dim)">𝄢</text>`;
 
+    return svg;
+  }
+
+  // 畫單一個音符的加線、升記號、音符本體，x 座標可自訂 (雙音模式需要左右錯開)
+  function noteElementsSVG(note, x) {
+    const y = yForIndex(note.diatonicIndex);
+    const strokeColor = "var(--text-dim)";
+    let svg = "";
+
     // 加線 (ledger lines)：中央 C、或超出譜表範圍時需要畫
     const ledgerW = 20;
     if (note.diatonicIndex === 28) {
-      // 中央 C 的加線
-      svg += `<line x1="${NOTE_X - ledgerW/2}" y1="${y}" x2="${NOTE_X + ledgerW/2}" y2="${y}" stroke="${strokeColor}" stroke-width="1.2"/>`;
+      svg += `<line x1="${x - ledgerW/2}" y1="${y}" x2="${x + ledgerW/2}" y2="${y}" stroke="${strokeColor}" stroke-width="1.2"/>`;
     } else if (note.diatonicIndex > 38) {
-      // 高音譜表上方的加線
       for (let j = 40; j <= note.diatonicIndex; j += 2) {
         const ly = yForIndex(j);
-        svg += `<line x1="${NOTE_X - ledgerW/2}" y1="${ly}" x2="${NOTE_X + ledgerW/2}" y2="${ly}" stroke="${strokeColor}" stroke-width="1.2"/>`;
+        svg += `<line x1="${x - ledgerW/2}" y1="${ly}" x2="${x + ledgerW/2}" y2="${ly}" stroke="${strokeColor}" stroke-width="1.2"/>`;
       }
     } else if (note.diatonicIndex < 18) {
-      // 低音譜表下方的加線
       for (let j = 16; j >= note.diatonicIndex; j -= 2) {
         const ly = yForIndex(j);
-        svg += `<line x1="${NOTE_X - ledgerW/2}" y1="${ly}" x2="${NOTE_X + ledgerW/2}" y2="${ly}" stroke="${strokeColor}" stroke-width="1.2"/>`;
+        svg += `<line x1="${x - ledgerW/2}" y1="${ly}" x2="${x + ledgerW/2}" y2="${ly}" stroke="${strokeColor}" stroke-width="1.2"/>`;
       }
     }
 
     // 升記號 ♯
     if (note.accidental) {
-      svg += `<text x="${NOTE_X - 22}" y="${y + 6}" font-size="17" fill="var(--text)">♯</text>`;
+      svg += `<text x="${x - 22}" y="${y + 6}" font-size="17" fill="var(--text)">♯</text>`;
     }
 
     // 音符本體 (橢圓形，稍微傾斜比較像手寫音符)
-    svg += `<ellipse cx="${NOTE_X}" cy="${y}" rx="7.5" ry="5.6" fill="var(--text)" transform="rotate(-18 ${NOTE_X} ${y})"/>`;
+    svg += `<ellipse cx="${x}" cy="${y}" rx="7.5" ry="5.6" fill="var(--text)" transform="rotate(-18 ${x} ${y})"/>`;
 
-    svg += `</svg>`;
+    return svg;
+  }
+
+  function noteStaffSVG(note) {
+    const svg = `<svg viewBox="0 0 ${SVG_W} ${SVG_H}" xmlns="http://www.w3.org/2000/svg">`
+      + staffBaseSVG()
+      + noteElementsSVG(note, NOTE_X)
+      + `</svg>`;
+    return svg;
+  }
+
+  // 雙音 (和聲) 模式：同一個譜表上同時畫出根音跟上面那個音
+  // 如果兩音在譜表上的位置太靠近 (二度以內)，把上面那個音往右錯開，避免音符頭重疊在一起
+  function dualNoteStaffSVG(root, top) {
+    const diff = Math.abs(root.diatonicIndex - top.diatonicIndex);
+    const needsOffset = diff <= 1;
+    const rootX = NOTE_X - (needsOffset ? 6 : 0);
+    const topX = NOTE_X + (needsOffset ? 6 : 0);
+
+    const svg = `<svg viewBox="0 0 ${SVG_W} ${SVG_H}" xmlns="http://www.w3.org/2000/svg">`
+      + staffBaseSVG()
+      + noteElementsSVG(root, rootX)
+      + noteElementsSVG(top, topX)
+      + `</svg>`;
     return svg;
   }
 
@@ -514,8 +635,16 @@
     options.forEach(opt => {
       const btn = document.createElement("button");
       btn.className = "opt-btn";
-      btn.dataset.name = opt.name;
-      btn.innerHTML = `<span class="staff-svg">${noteStaffSVG(opt)}</span><span class="badge"></span>`;
+
+      if (mode === "dual") {
+        btn.dataset.root = opt.root.name;
+        btn.dataset.top = opt.top.name;
+        btn.innerHTML = `<span class="staff-svg">${dualNoteStaffSVG(opt.root, opt.top)}</span><span class="badge"></span>`;
+      } else {
+        btn.dataset.name = opt.name;
+        btn.innerHTML = `<span class="staff-svg">${noteStaffSVG(opt)}</span><span class="badge"></span>`;
+      }
+
       btn.addEventListener("click", () => handleAnswer(opt, btn));
       optionsEl.appendChild(btn);
     });
@@ -526,7 +655,10 @@
     answered = true;
     stats.total++;
 
-    const isCorrect = opt.name === current.name;
+    const isCorrect = mode === "dual"
+      ? (opt.root.name === current.root.name && opt.top.name === current.top.name)
+      : (opt.name === current.name);
+
     if (isCorrect) {
       stats.correct++;
       stats.streak++;
@@ -536,18 +668,31 @@
     updateStats();
 
     [...optionsEl.children].forEach(child => {
-      const label = child.dataset.name;
       child.disabled = true;
-      if (label === current.name) {
-        child.classList.add("correct");
-        child.querySelector(".badge").textContent = `正確答案 · ${label}`;
-      } else if (child === btnEl) {
-        child.classList.add("wrong");
-        child.querySelector(".badge").textContent = `你的選擇 · ${label}`;
+
+      if (mode === "dual") {
+        const isThisCorrect = child.dataset.root === current.root.name && child.dataset.top === current.top.name;
+        if (isThisCorrect) {
+          child.classList.add("correct");
+          child.querySelector(".badge").textContent = `正確答案 · ${current.root.name} + ${current.top.name}`;
+        } else if (child === btnEl) {
+          child.classList.add("wrong");
+          child.querySelector(".badge").textContent = `你的選擇 · ${child.dataset.root} + ${child.dataset.top}`;
+        }
+      } else {
+        const label = child.dataset.name;
+        if (label === current.name) {
+          child.classList.add("correct");
+          child.querySelector(".badge").textContent = `正確答案 · ${label}`;
+        } else if (child === btnEl) {
+          child.classList.add("wrong");
+          child.querySelector(".badge").textContent = `你的選擇 · ${label}`;
+        }
       }
     });
 
-    feedbackEl.textContent = isCorrect ? "✅ 答對了！耳朵很準" : `❌ 答錯了，正確答案是 ${current.name}`;
+    const correctLabel = mode === "dual" ? `${current.root.name} + ${current.top.name}` : current.name;
+    feedbackEl.textContent = isCorrect ? "✅ 答對了！耳朵很準" : `❌ 答錯了，正確答案是 ${correctLabel}`;
     feedbackEl.className = "feedback show " + (isCorrect ? "good" : "bad");
     nextBtn.classList.add("show");
   }
@@ -567,7 +712,8 @@
   playBtn.addEventListener("click", () => {
     playBtn.disabled = true;
     waveEl.classList.add("playing");
-    const ms = playTone(current.freq);
+    const freqs = mode === "dual" ? [current.root.freq, current.top.freq] : [current.freq];
+    const ms = playTones(freqs);
     document.getElementById("replayNote").textContent = "播放中…";
     setTimeout(() => {
       waveEl.classList.remove("playing");
@@ -578,16 +724,32 @@
 
   nextBtn.addEventListener("click", buildQuestion);
 
+  document.getElementById("resetBtn").addEventListener("click", () => {
+    stats = { correct: 0, total: 0, streak: 0 };
+    updateStats();
+    buildQuestion();
+  });
+
+  document.getElementById("modeRow").addEventListener("click", (e) => {
+    const btn = e.target.closest(".diff-btn");
+    if (!btn) return;
+    mode = btn.dataset.mode;
+    [...document.querySelectorAll("#modeRow .diff-btn")].forEach(b => b.classList.toggle("active", b === btn));
+    document.getElementById("pageTitle").textContent = mode === "dual" ? "這是什麼音程？" : "這是哪個音？";
+    buildQuestion();
+  });
+
   document.getElementById("diffRow").addEventListener("click", (e) => {
     const btn = e.target.closest(".diff-btn");
     if (!btn) return;
     difficulty = btn.dataset.diff;
-    [...document.querySelectorAll(".diff-btn")].forEach(b => b.classList.toggle("active", b === btn));
+    [...document.querySelectorAll("#diffRow .diff-btn")].forEach(b => b.classList.toggle("active", b === btn));
     buildQuestion();
   });
 
-  // 預設難度
-  document.querySelector('.diff-btn[data-diff="easy"]').classList.add("active");
+  // 預設模式與難度
+  document.querySelector('#modeRow .diff-btn[data-mode="single"]').classList.add("active");
+  document.querySelector('#diffRow .diff-btn[data-diff="easy"]').classList.add("active");
 
   // ---------- 7. PWA: 註冊 service worker (離線支援) ----------
   if ("serviceWorker" in navigator) {
