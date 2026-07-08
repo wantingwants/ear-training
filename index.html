@@ -186,7 +186,7 @@
     transition: border-color 0.15s ease, background 0.15s ease;
   }
   .opt-btn:active { transform: scale(0.99); }
-  .opt-btn:disabled { cursor: default; }
+  .opt-btn.answered:not(.correct):not(.wrong) { opacity: 0.65; }
 
   .opt-btn .staff-svg {
     width: 100%;
@@ -391,31 +391,64 @@
     return audioCtx;
   }
 
+  // 在指定的時間點排程播放一個音，包含淡入淡出包絡
+  function scheduleTone(ctx, freq, startTime, duration, gainLevel) {
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = "sine";
+    osc.frequency.value = freq;
+
+    gain.gain.setValueAtTime(0, startTime);
+    gain.gain.linearRampToValueAtTime(gainLevel, startTime + 0.03);
+    gain.gain.setValueAtTime(gainLevel, startTime + duration - 0.08);
+    gain.gain.linearRampToValueAtTime(0, startTime + duration);
+
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(startTime);
+    osc.stop(startTime + duration + 0.05);
+  }
+
   function playTones(freqs, duration = 1.1) {
     const ctx = getCtx();
     const now = ctx.currentTime;
     // 多個音一起從同一個時間點開始播放，才會聽起來是「同時」的和聲
-    // 每個音量稍微降低一點，避免疊加後音量爆掉
-    const perVoiceGain = freqs.length > 1 ? 0.2 : 0.28;
+    // 音量設定：單音跟雙音(兩個音疊加)分開設定，避免疊加後破音
+    // 兩個音同時播放時，波形有機會疊加到接近兩倍振幅，所以每個音的音量要抓保守一點
+    const perVoiceGain = freqs.length > 1 ? 0.4 : 0.65;
 
-    freqs.forEach(freq => {
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      osc.type = "sine";
-      osc.frequency.value = freq;
-
-      gain.gain.setValueAtTime(0, now);
-      gain.gain.linearRampToValueAtTime(perVoiceGain, now + 0.03);
-      gain.gain.setValueAtTime(perVoiceGain, now + duration - 0.15);
-      gain.gain.linearRampToValueAtTime(0, now + duration);
-
-      osc.connect(gain).connect(ctx.destination);
-      osc.start(now);
-      osc.stop(now + duration + 0.05);
-    });
+    freqs.forEach(freq => scheduleTone(ctx, freq, now, duration, perVoiceGain));
 
     return duration * 1000;
+  }
+
+  // 雙音模式專用：公布答案時，依序播放「和聲 → 低音單音 → 高音單音 → 和聲」
+  // 方便使用者聽清楚這個音程是由哪兩個音組成的
+  function playIntervalSequence(rootFreq, topFreq) {
+    const ctx = getCtx();
+    const now = ctx.currentTime;
+
+    const chordDur = 0.85, chordGap = 0.12;
+    const singleDur = 0.5, singleGap = 0.08;
+    const chordGain = 0.4, singleGain = 0.6;
+
+    let t = now;
+
+    scheduleTone(ctx, rootFreq, t, chordDur, chordGain);
+    scheduleTone(ctx, topFreq, t, chordDur, chordGain);
+    t += chordDur + chordGap;
+
+    scheduleTone(ctx, rootFreq, t, singleDur, singleGain);
+    t += singleDur + singleGap;
+
+    scheduleTone(ctx, topFreq, t, singleDur, singleGain);
+    t += singleDur + singleGap;
+
+    scheduleTone(ctx, rootFreq, t, chordDur, chordGain);
+    scheduleTone(ctx, topFreq, t, chordDur, chordGain);
+    t += chordDur;
+
+    return (t - now) * 1000;
   }
 
   // ---------- 3. 遊戲狀態 ----------
@@ -650,10 +683,27 @@
     });
   }
 
+  // 播放選項本身的音高：單音模式播那個音，雙音模式依序播放 和聲->低音->高音->和聲
+  function playOptionSound(opt) {
+    if (mode === "dual") {
+      playIntervalSequence(opt.root.freq, opt.top.freq);
+    } else {
+      playTones([opt.freq]);
+    }
+  }
+
   function handleAnswer(opt, btnEl) {
-    if (answered) return;
+    // 已經公布過答案了：點其他選項只是重播那個選項的聲音，不會重新計分
+    if (answered) {
+      playOptionSound(opt);
+      return;
+    }
+
     answered = true;
     stats.total++;
+
+    // 播放這個選項本身的音高，讓使用者可以馬上比較「選的」跟「聽到的」
+    playOptionSound(opt);
 
     const isCorrect = mode === "dual"
       ? (opt.root.name === current.root.name && opt.top.name === current.top.name)
@@ -668,7 +718,7 @@
     updateStats();
 
     [...optionsEl.children].forEach(child => {
-      child.disabled = true;
+      child.classList.add("answered"); // 只是樣式標記，按鈕仍保持可點擊，才能重播聲音
 
       if (mode === "dual") {
         const isThisCorrect = child.dataset.root === current.root.name && child.dataset.top === current.top.name;
